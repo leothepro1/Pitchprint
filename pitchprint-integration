@@ -1,0 +1,108 @@
+// server.js
+const http   = require('http');
+const crypto = require('crypto');
+const { URL } = require('url');
+
+// DINA NYCKLAR
+const API_KEY    = 'key_a98cb37e503b4ffe35e0077d10f7af06';
+const SECRET_KEY = 'secr_hnMBzH[JN&9flVLyI]X&XsEuVydtBq';
+const PORT       = 3001;
+
+// CORS‐headers som applies på ALLA svar
+const CORS_HEADERS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type'
+};
+
+const server = http.createServer(async (req, res) => {
+  const { method, url } = req;
+  const parsed = new URL(url, `http://${req.headers.host}`);
+
+  console.log(`[SERVER] ${method} ${parsed.pathname}`);
+
+  // 1) Hantera preflight
+  if (method === 'OPTIONS') {
+    res.writeHead(204, CORS_HEADERS);
+    return res.end();
+  }
+
+  // 2) Signatur‐endpoint
+  if (method === 'GET' && parsed.pathname === '/api/pitchprint/signature') {
+    console.log('[SERVER] Genererar signatur');
+    const timestamp = Math.floor(Date.now() / 1000);
+    const signature = crypto
+      .createHash('md5')
+      .update(API_KEY + SECRET_KEY + timestamp)
+      .digest('hex');
+
+    const payload = JSON.stringify({ apiKey: API_KEY, timestamp, signature });
+    res.writeHead(200, {
+      ...CORS_HEADERS,
+      'Content-Type': 'application/json'
+    });
+    return res.end(payload);
+  }
+
+  // 3) Proxy för filuppladdning
+  if (method === 'POST' && parsed.pathname === '/api/pitchprint/file_upload') {
+    let body = '';
+    req.on('data', chunk => { body += chunk; });
+    req.on('end', async () => {
+      try {
+        console.log('[SERVER] Mottog file_upload‐body length:', body.length);
+        const { fileName, fileData, designId } = JSON.parse(body);
+
+        // Generera ny signatur
+        const timestamp = Math.floor(Date.now() / 1000);
+        const signature = crypto
+          .createHash('md5')
+          .update(API_KEY + SECRET_KEY + timestamp)
+          .digest('hex');
+
+        const payload = {
+          apiKey:    API_KEY,
+          timestamp,
+          signature,
+          designId,
+          fileName,
+          fileData
+        };
+        console.log('[SERVER] Skickar till PitchPrint:', { designId, fileName });
+
+        const ppRes = await fetch('https://api.pitchprint.io/runtime/file_upload', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+
+        const text = await ppRes.text();
+        console.log('[SERVER] PitchPrint svarade status:', ppRes.status);
+
+        res.writeHead(ppRes.status, {
+          ...CORS_HEADERS,
+          'Content-Type': 'application/json'
+        });
+        return res.end(text);
+      } catch (err) {
+        console.error('[SERVER][ERROR] file_upload:', err);
+        res.writeHead(500, {
+          ...CORS_HEADERS,
+          'Content-Type': 'application/json'
+        });
+        return res.end(JSON.stringify({ error: err.message }));
+      }
+    });
+    return;
+  }
+
+  // 404 för allt annat
+  res.writeHead(404, CORS_HEADERS);
+  res.end();
+});
+
+server.listen(PORT, () => {
+  console.log(`Server körs på http://localhost:${PORT}`);
+  console.log(`  • GET  /api/pitchprint/signature`);
+  console.log(`  • POST /api/pitchprint/file_upload`);
+});
